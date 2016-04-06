@@ -22,7 +22,7 @@ id int ,
 gid varchar,
 num int,
 y_m int,
-PRIMARY KEY (locale,id,gid),
+PRIMARY KEY (locale,id,gid,y_m),
 FOREIGN KEY (id) REFERENCES person(id),
 FOREIGN KEY (gid) REFERENCES good(id)
 );

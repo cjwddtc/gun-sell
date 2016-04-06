@@ -88,25 +88,31 @@ public:
   run_sql_fail_exception(std::string str_) : str(str_) {}
 };
 class sql_st {
-public:
   sqlite3_stmt *a;
-  ~sql_st() { sqlite3_finalize(a); }
-  sql_st(sqlite3 *db, std::string sql) {
-    sqlite3_prepare_v2(db, sql.c_str(), -1, &a, 0);
+  void bind_(std::string &str, int n) {
+    char *ptr = (char *)malloc(str.size() + 1);
+    strcpy(ptr, str.c_str());
+    assert(sqlite3_bind_text(a, n, ptr, -1, free) == SQLITE_OK);
   }
+  void bind_(int m, int n) { assert(sqlite3_bind_int(a, n, m) == SQLITE_OK); }
   void reset() {
     sqlite3_reset(a);
     sqlite3_clear_bindings(a);
   }
-  void bind(std::string str, int n) {
-    assert(sqlite3_bind_text(a, n, str.c_str(), -1, 0) == SQLITE_OK);
+
+public:
+  ~sql_st() { sqlite3_finalize(a); }
+  sql_st(sqlite3 *db, std::string sql) {
+    sqlite3_prepare_v2(db, sql.c_str(), -1, &a, 0);
   }
-  void bind(int m, int n) {
-    if (sqlite3_bind_int(a, n, m) != SQLITE_OK) {
-      fprintf(stderr, "%s\n", sqlite3_errmsg(sqlite3_db_handle(a)));
-      throw sqlite3_errmsg(sqlite3_db_handle(a));
+  template <size_t n = 1, class... ARG, class T> void bind(T a, ARG... arg) {
+    if (n == 1) {
+      reset();
     }
+    bind_(a, n);
+    bind<n + 1>(arg...);
   }
+  template <size_t n> void bind() {}
   class proxy {
     sqlite3_value *value;
 
@@ -139,21 +145,24 @@ void bill::gen_cost(sqlite3 *db) const {
   static sql_st get_cost(db, "select cost from good where id=?1");
   cost = 0;
   for (sell_info &a : vec) {
-    get_cost.reset();
-    get_cost.bind(a.gid, 1);
+    get_cost.bind(a.gid);
     assert(get_cost.run());
     cost += a.num * (int)get_cost[0];
   }
   commissions = 0;
-  if (cost > 1800) {
-    commissions += (cost - 1800) * 0.2;
-    cost = 1800;
+  {
+    int cost = this->cost;
+    if (cost > 1800) {
+      commissions += (cost - 1800) * 0.2;
+      cost = 1800;
+    }
+    if (cost > 1000) {
+      commissions += (cost - 1000) * 0.15;
+      cost = 1000;
+    }
+    commissions += cost * 0.1;
   }
-  if (cost > 1000) {
-    commissions += (cost - 1000) * 0.15;
-    cost = 1000;
-  }
-  commissions += cost * 0.1;
+  printf("%d,%d", commissions, cost);
 }
 class good_leak_exception : public std::exception {};
 class select_fail_exception : public std::exception {};
@@ -168,13 +177,14 @@ public:
   inline void start() { sqlite3_exec(a, "begin;", 0, 0, 0); }
   inline void finish() { sqlite3_exec(a, "commit;", 0, 0, 0); }
   int add_sell(int id, std::string gid, int num, std::string locale) {
-    sql_st get_remain(a, "select remain from good where id= ?1");
-    sql_st update_remain(a, "update good set remain= ?1 where id= ?2");
-    sql_st insert_sell(a, "insert into sell values ( ?1, ?2, ?3, ?4, ?5)");
-    get_remain.reset();
-    get_remain.bind(gid, 1);
+    static sql_st get_remain(a, "select remain from good where id= ?1");
+    static sql_st update_remain(a, "update good set remain= ?1 where id= ?2");
+    static sql_st insert_sell(a,
+                              "insert into sell values ( ?1, ?2, ?3, ?4, ?5)");
+    get_remain.bind(gid);
     start();
     if (!get_remain.run()) {
+      finish();
       throw select_fail_exception();
     }
     int n = get_remain[0];
@@ -182,43 +192,30 @@ public:
       finish();
       throw good_leak_exception();
     } else {
-      update_remain.reset();
-      update_remain.bind(n - num, 1);
-      update_remain.bind(gid, 2);
+      update_remain.bind(n - num, gid);
       update_remain.run();
       // insert_sell.bind(gid, id, locale, num, get_date()); /*
-      insert_sell.reset();
-      insert_sell.bind(locale, 1);
-      insert_sell.bind(id, 2);
-      insert_sell.bind(gid, 3);
-      insert_sell.bind(num, 4);
-      insert_sell.bind(get_date(), 5);
+      insert_sell.bind(locale, id, gid, num, get_date());
       insert_sell.run();
       finish();
       return 0;
     }
   }
   bills get_bill(int id) {
-    sql_st get_pay_date(a, "select pay_data from person where id= ?1");
-    sql_st update_pay_date(a, "update person set pay_data=?1 where id= ?2");
-    sql_st select_bill(a, "select locale,gid,num,y_m from sell where id= ?1 "
-                          "and y_m>?2 and y_m<?3");
-    get_pay_date.reset();
-    get_pay_date.bind(id, 1);
+    static sql_st get_pay_date(a, "select pay_data from person where id= ?1");
+    static sql_st update_pay_date(a,
+                                  "update person set pay_data=?1 where id= ?2");
+    static sql_st select_bill(
+        a, "select locale,gid,num,y_m from sell where id= ?1 "
+           "and y_m>=?2 and y_m<?3");
+    get_pay_date.bind(id);
     start();
     get_pay_date.run();
-    update_pay_date.reset();
-    update_pay_date.bind(get_date(), 1);
-    update_pay_date.bind(id, 2);
+    update_pay_date.bind(get_date(), id);
     update_pay_date.run();
     int date = get_pay_date[0];
     bills bls;
-    select_bill.reset();
-    select_bill.bind(id, 1);
-    select_bill.bind(date, 2);
-    std::cout << "date" << date << std::endl;
-    std::cout << "date" << get_date() << std::endl;
-    select_bill.bind(get_date(), 3);
+    select_bill.bind(id, date, get_date());
     while (select_bill.run()) {
       std::string locale = select_bill[0];
       std::string gid = select_bill[1];
@@ -230,10 +227,40 @@ public:
     bls.gen_cost(a);
     return bls;
   }
+  std::string search_sell(int id, int start_date, int end_date,
+                          std::string locale) {
+    static sql_st search_locale_bill(a, "select gid,num,y_m from sell where "
+                                        "id= ?1 and y_m>=?2 and y_m<=?3 and "
+                                        "locale=?4");
+    static sql_st search_bill(a, "select locale,gid,num,y_m from sell where "
+                                 "id= ?1 and y_m>=?2 and y_m<=?3");
+    std::stringstream ret;
+    if (locale.empty()) {
+      search_bill.bind(id, start_date, end_date);
+      ret << "locale\tgid\tnum\ty_m\n";
+      while (search_bill.run()) {
+        std::string locale = search_bill[0];
+        ret << locale.substr(0, 7) << "\t" << (std::string)search_bill[1]
+            << "\t" << (int)search_bill[2] << "\t" << (int)search_bill[3]
+            << std::endl;
+        for (int i = 7; i < locale.size(); i += 7) {
+          ret << locale.substr(i, 7) << std::endl;
+        }
+      }
+    } else {
+      search_locale_bill.bind(id, start_date, end_date, locale);
+      ret << "gid\tnum\ty_m\n";
+      while (search_locale_bill.run()) {
+        ret << (std::string)search_locale_bill[0] << "\t"
+            << (int)search_locale_bill[1] << "\t" << (int)search_locale_bill[2]
+            << std::endl;
+      }
+    }
+    return ret.str();
+  }
   bool login(int id, std::string passwd) {
     sql_st select_paswd(a, "select password from person where id= ?1");
-    select_paswd.reset();
-    select_paswd.bind(id, 1);
+    select_paswd.bind(id);
     if (!select_paswd.run()) {
       return false;
     }
@@ -248,63 +275,42 @@ using boost::asio::ip::tcp;
 using boost::asio::buffer;
 using std::placeholders::_1;
 using std::placeholders::_2;
-
+class listener;
 class execer {
+  friend class listener;
   int id;
   std::array<char, 1024> ary;
-  boost::asio::io_service io_service;
   tcp::socket socket;
-  tcp::acceptor acceptor;
+  listener *lis;
+  execer(const execer &other) = delete;
+
+public:
+  execer(execer &&other) : lis(other.lis), socket(std::move(other.socket)) {}
   void read_data(const boost::system::error_code &ec, size_t bytes_transferred);
   void write_data(const boost::system::error_code &ec,
                   size_t bytes_transferred) {
     socket.async_read_some(buffer(ary),
                            std::bind(&execer::read_data, this, _1, _2));
   }
-  void new_socket(const boost::system::error_code &ec) {
-    id = -1;
-    socket.async_read_some(buffer(ary),
-                           std::bind(&execer::read_data, this, _1, _2));
-  }
-  std::thread thr;
-
-public:
-  execer()
-      : io_service(), socket(io_service),
-        acceptor(io_service, tcp::endpoint(tcp::v4(), 31415)),
-        thr(std::bind(&execer::monitor, this)) {}
-  void monitor() {
-    char ch;
-    while (true) {
-      std::cin.read(&ch, 1);
-      switch (ch) {
-      case 'q':
-        io_service.stop();
-        return;
-      case 'i':
-        date_off++;
-        break;
-      case 'd':
-        date_off--;
-        break;
-      }
-    }
-  }
-  void listen() {
-    acceptor.async_accept(socket, std::bind(&execer::new_socket, this, _1));
-    io_service.run();
-  }
+  void new_socket(const boost::system::error_code &ec);
+  execer(listener *lis_, boost::asio::io_service &io_service)
+      : socket(io_service), lis(lis_) {}
   std::string exec(const std::string &str) {
     char_separator<char> sep(" \t\n", "@");
     typedef tokenizer<char_separator<char>> tknz;
     tknz tok(str, sep);
     std::vector<std::string> vec(tok.begin(), tok.end());
-    printf("%d\n", vec.size());
     if (vec.size() == 0) {
       return "wrong input";
     }
     auto it = vec.begin();
     try {
+      if (*it == "connect") {
+        return "connect success";
+      }
+      if (*it == "exit") {
+        throw std::string("exit");
+      }
       if (*it == "login") {
         if (id != -1) {
           return "you are login";
@@ -356,8 +362,24 @@ public:
         b << ser.get_bill(id);
         return b.str();
       }
-      if (*it == "exit") {
-        throw std::string("exit");
+      if (*it == "search") {
+        if (vec.size() == 1) {
+          return ser.search_sell(id, 0, INT_MAX, std::string());
+        } else if (vec.size() == 2) {
+          int date = lexical_cast<int>(*++it);
+          return ser.search_sell(id, date, date, std::string());
+        } else {
+          int start = lexical_cast<int>(*++it);
+          int end = lexical_cast<int>(*++it);
+          std::string local;
+          if (vec.size() == 4) {
+            local = *++it;
+          }
+          if (vec.size() > 4) {
+            return "wrong input";
+          }
+          return ser.search_sell(id, start, end, local);
+        }
       }
     } catch (boost::bad_lexical_cast &e) {
       return std::string("illegal input:") + e.what();
@@ -370,9 +392,77 @@ public:
     }
     return "null";
   }
-  ~execer() { thr.join(); }
+};
+class listener {
+  boost::asio::io_service io_service;
+  tcp::acceptor acceptor;
+  std::thread thr;
+  std::set<execer *> avli;
+  bool is_listen;
+
+public:
+  listener(int n = 1)
+      : io_service(), acceptor(io_service, tcp::endpoint(tcp::v4(), 31415)),
+        thr(std::bind(&listener::monitor, this)) {
+    is_listen = false;
+    while (n--) {
+      avli.insert(new execer(this, io_service));
+    }
+  }
+  void monitor() {
+    char ch;
+    while (true) {
+      std::cin.read(&ch, 1);
+      switch (ch) {
+      case 'q':
+        io_service.stop();
+        return;
+      case 'i':
+        date_off++;
+        printf("%d\n", get_date());
+        break;
+      case 'd':
+        date_off--;
+        printf("%d\n", get_date());
+        break;
+      }
+    }
+  }
+  void unlisten() { is_listen = false; }
+  void listen() {
+    if (!is_listen && !avli.empty()) {
+      printf("keep listening\n");
+      execer *ex = *avli.begin();
+      acceptor.async_accept(ex->socket, std::bind(&execer::new_socket, ex, _1));
+      is_listen = true;
+      avli.erase(avli.begin());
+    }
+  }
+  void add(execer *a) {
+    printf("%p:close\n", a);
+    avli.insert(a);
+    listen();
+  }
+  void run() {
+    listen();
+    io_service.run();
+  }
+  ~listener() {
+    thr.join();
+    for (execer *ptr : avli) {
+      delete ptr;
+    }
+  }
 };
 
+void execer::new_socket(const boost::system::error_code &ec) {
+  id = -1;
+  lis->unlisten();
+  lis->listen();
+  printf("%p:connect build\n", this);
+  socket.async_read_some(buffer(ary),
+                         std::bind(&execer::read_data, this, _1, _2));
+}
 void execer::read_data(const boost::system::error_code &ec,
                        size_t bytes_transferred) {
   if (bytes_transferred == 1024) {
@@ -380,11 +470,11 @@ void execer::read_data(const boost::system::error_code &ec,
   }
   if (!bytes_transferred) {
     socket.close();
-    io_service.stop();
-    io_service.reset();
-    listen();
+    lis->add(this);
     return;
   }
+  ary[bytes_transferred] = 0;
+  printf("%p:get data:%s\n", this, ary.data());
   try {
     std::string str_ =
         exec(std::string(ary.begin(), ary.begin() + bytes_transferred));
@@ -399,16 +489,18 @@ void execer::read_data(const boost::system::error_code &ec,
     str += '\0';
     boost::asio::write(socket, boost::asio::buffer(str));
     socket.close();
-    io_service.stop();
-    io_service.reset();
-    listen();
+    lis->add(this);
   }
 }
 bool qwe = true;
-int main() {
+int main(int args, char *arg[]) {
+  if (args != 2) {
+    fprintf(stderr, "need max sockets\n");
+    return 1;
+  }
   std::string str;
-  execer a;
-  a.listen();
+  listener a(atoi(arg[1]));
+  a.run();
   /*
  sqlite3 *a;
  sqlite3_open("qwe.db", &a);
